@@ -33,24 +33,38 @@ docker compose up -d
 
 拉起 `pgvector/pgvector:pg16`，映射到本机 `5433` 端口。建表脚本由 Spring Boot 启动时自动执行（`schema.sql`，幂等可重复运行）。
 
-### 2. 配置模型密钥
+### 2. 填入密钥（只存本地）
 
-复制 `.env.example` 里的变量名，设置为**系统环境变量**（或 IDEA 运行配置里的环境变量）：
+密钥**不写进任何配置文件**，只在启动瞬间以环境变量注入：
 
 ```bash
-DEEPSEEK_API_KEY=sk-xxx        # 对话模型
-DASHSCOPE_API_KEY=sk-xxx       # 向量化模型（通义千问百炼 text-embedding-v3）
+copy .env.example .env        # Windows
+cp .env.example .env          # macOS / Linux
 ```
 
-> 密钥只从环境变量读取，仓库里不放真实 key。忘记配置会得到占位符 `your-deepseek-api-key`，调用时报 401。
+然后编辑 `.env`：
+
+```bash
+DEEPSEEK_API_KEY=sk-xxx       # 对话模型
+DASHSCOPE_API_KEY=sk-xxx      # 向量化模型（通义千问百炼 text-embedding-v3）
+```
+
+`.env` 已被 `.gitignore` 排除，不会进入仓库。
 
 ### 3. 启动应用
 
 ```bash
-mvn spring-boot:run
+run.cmd        # Windows：读取 .env → 注入环境变量 → 启动
+./run.sh       # macOS / Linux
 ```
 
+脚本只做两件事：把 `.env` 里的键值导出成环境变量，再执行项目自带的 `mvnw`（Maven Wrapper，首次运行会自动下载 Maven，**不要求本机装过 Maven**）。启动日志里会打印 `[INFO] API keys injected from .env`。
+
+不用脚本时（例如在 IDEA 里启动），把这两个变量填进「运行配置 → 环境变量」即可。
+
 打开 http://localhost:8080 使用内置前端页面。
+
+> `application.yml` 里写的是 `${DEEPSEEK_API_KEY}`，**没有默认值**。密钥没注入会直接启动失败并指向缺失的变量名——这是刻意设计，比拿占位符跑出 401 好排查得多。
 
 ## API
 

@@ -25,8 +25,9 @@ langchain4j:
     # （Spring AI 会帮你补 /v1，LangChain4j 相反——这是切框架最容易踩的坑）
     chat-model:
       base-url: ${DEEPSEEK_BASE_URL:https://tokenx24.com/v1}
-      # 请通过环境变量 DEEPSEEK_API_KEY 注入，切勿把真实 key 写进本文件（公开仓库会泄露）
-      api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key}
+      # 密钥不落配置文件：由启动时注入的环境变量提供（见根目录 .env / run.cmd）
+      # 未注入会直接启动失败（占位符无法解析），这是刻意设计——避免拿占位符跑出 401 排查半天
+      api-key: ${DEEPSEEK_API_KEY}
       model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
       temperature: 0.3
     # 流式对话模型：ReActAgent 构造时按 StreamingChatModel 注入。
@@ -34,8 +35,9 @@ langchain4j:
     # 只配 chat-model 会导致启动报 NoSuchBeanDefinitionException。
     streaming-chat-model:
       base-url: ${DEEPSEEK_BASE_URL:https://tokenx24.com/v1}
-      # 请通过环境变量 DEEPSEEK_API_KEY 注入，切勿把真实 key 写进本文件（公开仓库会泄露）
-      api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key}
+      # 密钥不落配置文件：由启动时注入的环境变量提供（见根目录 .env / run.cmd）
+      # 未注入会直接启动失败（占位符无法解析），这是刻意设计——避免拿占位符跑出 401 排查半天
+      api-key: ${DEEPSEEK_API_KEY}
       model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
       temperature: 0.3
       # 让服务端在流式响应的最后一个分片里带上 token 用量，
@@ -44,8 +46,8 @@ langchain4j:
     # 向量化模型：通义千问百炼（text-embedding-v3，1024 维，与建表一致）
     embedding-model:
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
-      # 请通过环境变量 DASHSCOPE_API_KEY 注入，切勿把真实 key 写进本文件（公开仓库会泄露）
-      api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key}
+      # 密钥不落配置文件：由启动时注入的环境变量提供（见根目录 .env / run.cmd）
+      api-key: ${DASHSCOPE_API_KEY}
       model-name: ${DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
 
 server:
