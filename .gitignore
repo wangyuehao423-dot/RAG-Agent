@@ -1,0 +1,31 @@
+# ---- 构建产物 ----
+target/
+*.class
+*.jar
+*.war
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# ---- 运行时日志 ----
+logs/
+*.log
+
+# ---- 本地调试产物 ----
+b.txt
+c.txt
+d.txt
+dbg.txt
+dep.txt
+
+# ---- 环境变量 / 密钥 ----
+.env
+.env.local
+*.pem
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db

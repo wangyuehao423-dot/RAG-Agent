@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>企业知识库问答助手</title>
+<style>
+:root {
+  --bg: #f5f7fa;
+  --panel: #ffffff;
+  --border: #e2e8f0;
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+  --text: #1e293b;
+  --text-2: #64748b;
+  --danger: #dc2626;
+  --ok: #16a34a;
+  --radius: 10px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+header {
+  background: linear-gradient(135deg, #1e3a8a, #2563eb);
+  color: #fff;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+}
+header h1 { font-size: 20px; font-weight: 600; }
+header .sub { font-size: 13px; opacity: .85; margin-top: 2px; }
+main { flex: 1; display: flex; min-height: 0; }
+aside {
+  width: 280px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+aside section { padding: 16px; border-bottom: 1px solid var(--border); }
+aside h2 { font-size: 13px; color: var(--text-2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 12px; }
+.btn {
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); }
+.btn-danger { background: transparent; color: var(--danger); border: 1px solid #fecaca; padding: 3px 8px; font-size: 12px; }
+.btn-danger:hover { background: #fef2f2; }
+.upload-row { display: flex; gap: 8px; align-items: center; }
+.upload-row input[type=file] { font-size: 12px; flex: 1; min-width: 0; }
+.upload-row .btn { flex-shrink: 0; white-space: nowrap; }
+.list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  background: #fff;
+  transition: border-color .15s;
+}
+.list-item:hover { border-color: var(--primary); }
+.list-item.active { border-color: var(--primary); background: #eff6ff; }
+.list-item .meta { font-size: 11px; color: var(--text-2); margin-top: 3px; }
+.badge { font-size: 11px; padding: 1px 8px; border-radius: 99px; }
+.badge.ok { background: #dcfce7; color: var(--ok); }
+.badge.err { background: #fee2e2; color: var(--danger); }
+.empty-hint { color: var(--text-2); font-size: 12px; text-align: center; padding: 12px 0; }
+#chatArea {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.msg { max-width: 75%; padding: 10px 14px; border-radius: var(--radius); font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.msg.user { align-self: flex-end; background: var(--primary); color: #fff; border-bottom-right-radius: 4px; }
+.msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.msg.system { align-self: center; background: #f1f5f9; color: var(--text-2); font-size: 12px; }
+.msg.err { align-self: flex-start; background: #fef2f2; border: 1px solid #fecaca; color: var(--danger); }
+.sources {
+  margin-top: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.sources details { margin-top: 4px; }
+.sources summary { cursor: pointer; }
+.sources .src { padding: 4px 0; }
+.sources .src b { color: var(--text); }
+.sources .score { color: var(--primary); }
+.typing::after { content: "▍"; animation: blink 1s infinite; color: var(--primary); }
+@keyframes blink { 50% { opacity: 0; } }
+#inputBar {
+  display: flex;
+  gap: 10px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+#question {
+  flex: 1;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 14px;
+  resize: none;
+  outline: none;
+  font-family: inherit;
+}
+#question:focus { border-color: var(--primary); }
+#sendBtn { align-self: stretch; padding: 0 24px; font-size: 14px; }
+#statusBar { padding: 6px 24px; font-size: 12px; color: var(--text-2); background: #f8fafc; border-top: 1px solid var(--border); }
+#newChatBtn { width: 100%; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>企业知识库问答助手</h1>
+    <div class="sub">RAG Agent · 文档入库 / 混合检索 / 多轮对话</div>
+  </div>
+  <div style="font-size:12px;opacity:.8" id="apiStatus">检测中…</div>
+</header>
+
+<main>
+  <aside>
+    <section>
+      <h2>知识库文档</h2>
+      <div class="upload-row">
+        <input type="file" id="fileInput" accept=".txt,.md,.pdf,.docx">
+        <button class="btn btn-primary" id="uploadBtn">上传</button>
+      </div>
+      <div id="docList" style="margin-top:12px"></div>
+    </section>
+    <section>
+      <h2>会话</h2>
+      <button class="btn btn-primary" id="newChatBtn">新建会话</button>
+      <div id="convList"></div>
+    </section>
+  </aside>
+
+  <div id="chatArea">
+    <div id="messages"></div>
+    <div id="inputBar">
+      <textarea id="question" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+      <button class="btn btn-primary" id="sendBtn">发送</button>
+    </div>
+    <div id="statusBar">就绪</div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  let currentConvId = null;
+
+  /* ---------- 工具 ---------- */
+  const esc = (s) => (s || "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  async function api(url, opts) {
+    const r = await fetch(url, opts);
+    if (!r.ok) {
+      let msg = "HTTP " + r.status;
+      try { const b = await r.json(); msg = (b.code ? b.code + "：" : "") + (b.error || msg); } catch (e) {}
+      throw new Error(msg);
+    }
+    return r.json();
+  }
+
+  function status(text) { $("statusBar").textContent = text; }
+
+  function addMsg(role, text, sources, isErr) {
+    const div = document.createElement("div");
+    div.className = "msg " + role + (isErr ? " err" : "");
+    div.innerHTML = esc(text);
+    if (sources && sources.length) {
+      const box = document.createElement("div");
+      box.className = "sources";
+      const det = document.createElement("details");
+      det.open = sources.length <= 3;
+      det.innerHTML = "<summary>参考来源（" + sources.length + " 条）</summary>" +
+        sources.map(s => '<div class="src"><b>' + esc(s.sourceName) + '</b> ' +
+          '<span class="score">相关度 ' + (s.similarity * 100).toFixed(0) + '% / 词法 ' + (s.lexicalScore * 100).toFixed(1) + '%</span><br>' +
+          esc(s.snippet || "") + "</div>").join("");
+      div.appendChild(box);
+    }
+    $("messages").appendChild(div);
+    $("messages").scrollTop = $("messages").scrollHeight;
+    return div;
+  }
+
+  /* ---------- 文档 ---------- */
+  async function loadDocs() {
+    try {
+      const docs = await api("/api/documents");
+      $("docList").innerHTML = docs.length ? "" : '<div class="empty-hint">暂无文档，请上传</div>';
+      docs.forEach(d => {
+        const item = document.createElement("div");
+        item.className = "list-item";
+        const badge = d.status === "DONE" ? '<span class="badge ok">已入库</span>' :
+          d.status === "FAILED" ? '<span class="badge err">失败</span>' : '<span class="badge">' + esc(d.status || "") + '</span>';
+        item.innerHTML = '<div><div>' + esc(d.name) + '</div><div class="meta">' + d.chunk_count + " 个分块 · " +
+          new Date(d.created_at).toLocaleString() + '</div></div><div style="display:flex;gap:6px;align-items:center">' + badge +
+          '<button class="btn btn-danger" data-id="' + d.id + '" title="删除">删除</button></div>';
+        item.querySelector("div:first-child").addEventListener("click", () => openDoc(d.id, d.name));
+        item.querySelector("[data-id]").addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (!confirm("删除文档「" + d.name + "」及其分块？")) return;
+          try {
+            await api("/api/documents/" + d.id, { method: "DELETE" });
+            status("文档已删除");
+            loadDocs();
+          } catch (err) { status("删除失败：" + err.message); }
+        });
+        $("docList").appendChild(item);
+      });
+    } catch (err) { $("docList").innerHTML = '<div class="empty-hint">加载失败：' + esc(err.message) + "</div>"; }
+  }
+
+  function openDoc(id, name) {
+    status("加载文档内容…");
+    api("/api/documents/" + id + "/content").then(doc => {
+      $("messages").innerHTML = "";
+      addMsg("system", "正在查看文档「" + doc.name + "」 · " + (doc.file_type || "") + " · " +
+        doc.chunk_count + " 个分块 · " + new Date(doc.created_at).toLocaleString());
+      const fullText = (doc.chunks || []).map(c => c.content || "").join("\n\n").trim();
+      addMsg("assistant", fullText || "（该文档暂无内容）");
+      status("文档内容已加载");
+    }).catch(err => {
+      status("加载文档失败：" + err.message);
+      addMsg("system", "文档加载失败：" + err.message, null, true);
+    });
+  }
+
+  $("uploadBtn").addEventListener("click", async () => {
+    const f = $("fileInput").files[0];
+    if (!f) { status("请先选择文件"); return; }
+    const fd = new FormData();
+    fd.append("file", f);
+    $("uploadBtn").disabled = true;
+    status("上传并解析 " + f.name + " …");
+    try {
+      const r = await api("/api/documents", { method: "POST", body: fd });
+      status("入库完成：" + f.name + (r.status ? "（" + r.status + "）" : ""));
+      addMsg("system", "文档「" + f.name + "」已成功入库");
+      $("fileInput").value = "";
+      loadDocs();
+    } catch (err) {
+      status("上传失败：" + err.message);
+      addMsg("system", "文档「" + f.name + "」上传失败：" + err.message, null, true);
+    } finally { $("uploadBtn").disabled = false; }
+  });
+
+  /* ---------- 会话 ---------- */
+  async function loadConvs() {
+    try {
+      const convs = await api("/api/conversations");
+      $("convList").innerHTML = convs.length ? "" : '<div class="empty-hint">暂无历史会话</div>';
+      convs.forEach(c => {
+        const item = document.createElement("div");
+        item.className = "list-item" + (c.id === currentConvId ? " active" : "");
+        item.innerHTML = '<div><div>' + esc(c.title || "未命名会话") + '</div><div class="meta">' +
+          new Date(c.created_at).toLocaleString() + " · " + c.message_count + " 条消息</div></div>" +
+          '<button class="btn btn-danger" data-id="' + c.id + '">删除</button>';
+        item.querySelector("div:first-child").addEventListener("click", () => openConv(c.id));
+        item.querySelector("[data-id]").addEventListener("click", async (e) => {
+          e.stopPropagation();
+          if (!confirm("删除该会话及其消息？")) return;
+          try {
+            await api("/api/conversations/" + c.id, { method: "DELETE" });
+            if (c.id === currentConvId) { currentConvId = null; $("messages").innerHTML = ""; }
+            status("会话已删除");
+            loadConvs();
+          } catch (err) { status("删除失败：" + err.message); }
+        });
+        $("convList").appendChild(item);
+      });
+    } catch (err) { $("convList").innerHTML = '<div class="empty-hint">加载失败：' + esc(err.message) + "</div>"; }
+  }
+
+  function openConv(id) {
+    currentConvId = id;
+    $("messages").innerHTML = "";
+    status("加载历史消息…");
+    api("/api/conversations/" + encodeURIComponent(id) + "/messages").then(msgs => {
+      if (!msgs.length) {
+        addMsg("system", "该会话暂无消息");
+      } else {
+        msgs.forEach(m => {
+          if (m.role === "user") {
+            addMsg("user", m.content || "");
+          } else if (m.role === "assistant" || m.role === "ai") {
+            // langchain4j 持久化时角色写的是 ChatMessageType.AI 小写 "ai"，
+            // 历史数据里也可能存 "assistant"，两种都要渲染成助手气泡。
+            addMsg("assistant", m.content || "");
+          } else if (m.role === "system") {
+            addMsg("system", m.content || "");
+          }
+        });
+        status("已加载 " + msgs.length + " 条历史消息");
+      }
+    }).catch(err => {
+      status("加载历史失败：" + err.message);
+    });
+    loadConvs();
+  }
+
+  $("newChatBtn").addEventListener("click", () => {
+    currentConvId = null;
+    $("messages").innerHTML = "";
+    status("新会话（提交首问后自动创建）");
+  });
+
+  /* ---------- 聊天 ---------- */
+  async function send() {
+    const q = $("question").value.trim();
+    if (!q) return;
+    $("question").value = "";
+    addMsg("user", q);
+
+    const typing = addMsg("assistant", "");
+    typing.classList.add("typing");
+
+    const payload = { question: q };
+    if (currentConvId) payload.conversationId = currentConvId;
+
+    // 流式失败（连接中断 / 模型错误 / 上游报错）一律回退同步接口：
+    // 同步路径自带重试，尽量让用户拿到完整回答，而不是一行错误。
+    const fallbackSync = async (errNote) => {
+      typing.classList.remove("typing");
+      try {
+        const res = await api("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        typing.textContent = res.answer || "";
+        if (res.conversationId) currentConvId = res.conversationId;
+        if (res.refused) { typing.textContent = res.answer; }
+        if (res.sources && res.sources.length) {
+          const box = document.createElement("div");
+          box.className = "sources";
+          box.innerHTML = '<details><summary>参考来源（' + res.sources.length + ' 条）</summary>' +
+            res.sources.map(s => '<div class="src"><b>' + esc(s.sourceName) + '</b> ' +
+              '<span class="score">相关度 ' + (s.similarity * 100).toFixed(0) + '% / 词法 ' + (s.lexicalScore * 100).toFixed(1) + '%</span><br>' +
+              esc(s.snippet || "") + "</div>").join("") + '</details>';
+          typing.appendChild(box);
+        }
+        $("messages").scrollTop = $("messages").scrollHeight;
+        status("完成（同步）");
+        loadConvs();
+      } catch (e2) {
+        typing.textContent = (errNote ? errNote + "，" : "请求失败：") + e2.message;
+        typing.classList.add("err");
+        status("失败：" + e2.message);
+      }
+    };
+
+    // 流式优先；失败则回退同步接口
+    try {
+      const r = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!r.ok || !r.headers.get("content-type")?.includes("text/event-stream")) {
+        throw new Error("HTTP " + r.status);
+      }
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let doneMeta = null;
+      let sseError = null;
+
+      // 手动解析 SSE 帧（event/data 分行）
+      let curEvent = "";
+      const dispatch = (data) => {
+        if (curEvent === "error") {
+          sseError = data;
+        } else if (curEvent === "done") {
+          try { doneMeta = JSON.parse(data); } catch (e) {}
+        } else if (curEvent === "text" || curEvent === "") {
+          typing.textContent += data;
+          $("messages").scrollTop = $("messages").scrollHeight;
+        }
+        curEvent = "";
+      };
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          frame.split("\n").forEach(l => {
+            if (l.startsWith("event:")) curEvent = l.slice(6).trim();
+            else if (l.startsWith("data:")) dispatch(l.slice(5).trim());
+          });
+        }
+      }
+      typing.classList.remove("typing");
+      if (sseError) {
+        await fallbackSync("（模型错误）" + sseError);
+      } else if (doneMeta) {
+        if (doneMeta.conversationId) currentConvId = doneMeta.conversationId;
+        addMsg("system", "token 用量：" + doneMeta.promptTokens + " 输入 / " + doneMeta.completionTokens + " 输出" +
+          (doneMeta.refused ? " · 已拒答" : ""));
+        if (doneMeta.sources && doneMeta.sources.length) {
+          const box = document.createElement("div");
+          box.className = "sources";
+          box.innerHTML = '<details><summary>参考来源（' + doneMeta.sources.length + ' 条）</summary>' +
+            doneMeta.sources.map(s => '<div class="src"><b>' + esc(s.sourceName) + '</b> ' +
+              '<span class="score">相关度 ' + (s.similarity * 100).toFixed(0) + '% / 词法 ' + (s.lexicalScore * 100).toFixed(1) + '%</span><br>' +
+              esc(s.snippet || "") + "</div>").join("") + '</details>';
+          typing.appendChild(box);
+        }
+        $("messages").scrollTop = $("messages").scrollHeight;
+        status("完成");
+        loadConvs();
+      } else {
+        status("流结束但未收到 done 事件");
+      }
+    } catch (err) {
+      await fallbackSync();
+    }
+  }
+
+  $("sendBtn").addEventListener("click", send);
+  $("question").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  /* ---------- 健康检查 ---------- */
+  async function checkApi() {
+    try {
+      await api("/api/documents");
+      $("apiStatus").textContent = "API 正常";
+      $("apiStatus").style.color = "#bbf7d0";
+    } catch (e) {
+      $("apiStatus").textContent = "API 异常：" + e.message;
+      $("apiStatus").style.color = "#fecaca";
+    }
+  }
+
+  loadDocs();
+  loadConvs();
+  checkApi();
+})();
+</script>
+</body>
+</html>

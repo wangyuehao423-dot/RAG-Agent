@@ -1,0 +1,81 @@
+spring:
+  application:
+    name: rag-agent
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5433}/${POSTGRES_DB:ragdb}
+    username: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:postgres}
+  # 上传文件大小上限。这一项不配，Spring Boot 的默认值只有 1MB。
+  # 企业文档（员工手册 PDF、制度汇编）普遍 2~10MB，
+  # 超过上限会抛 MaxUploadSizeExceededException，被全局异常兜底成
+  # 500「服务内部错误」——用户完全想不到是文件太大，排查时非常痛苦。
+  # 所以两件事要一起做：这里放大上限 + 全局异常里把它映射成 413。
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+  sql:
+    init:
+      mode: always
+
+langchain4j:
+  open-ai:
+    # 对话模型：DeepSeek V4-flash（OpenAI 兼容协议，经 tokenx24 代理访问）
+    # 注意：LangChain4j 不会自动补 /v1，base-url 必须自带 /v1 结尾
+    # （Spring AI 会帮你补 /v1，LangChain4j 相反——这是切框架最容易踩的坑）
+    chat-model:
+      base-url: ${DEEPSEEK_BASE_URL:https://tokenx24.com/v1}
+      # 请通过环境变量 DEEPSEEK_API_KEY 注入，切勿把真实 key 写进本文件（公开仓库会泄露）
+      api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key}
+      model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+      temperature: 0.3
+    # 流式对话模型：ReActAgent 构造时按 StreamingChatModel 注入。
+    # 官方 starter 只有在配了 streaming-chat-model 才会创建 StreamingChatModel Bean，
+    # 只配 chat-model 会导致启动报 NoSuchBeanDefinitionException。
+    streaming-chat-model:
+      base-url: ${DEEPSEEK_BASE_URL:https://tokenx24.com/v1}
+      # 请通过环境变量 DEEPSEEK_API_KEY 注入，切勿把真实 key 写进本文件（公开仓库会泄露）
+      api-key: ${DEEPSEEK_API_KEY:your-deepseek-api-key}
+      model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+      temperature: 0.3
+      # 让服务端在流式响应的最后一个分片里带上 token 用量，
+      # 否则流式路径无法统计 token（成本核算失真）
+      stream-usage: true
+    # 向量化模型：通义千问百炼（text-embedding-v3，1024 维，与建表一致）
+    embedding-model:
+      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      # 请通过环境变量 DASHSCOPE_API_KEY 注入，切勿把真实 key 写进本文件（公开仓库会泄露）
+      api-key: ${DASHSCOPE_API_KEY:your-dashscope-api-key}
+      model-name: ${DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
+
+server:
+  port: 8080
+
+app:
+  retrieval:
+    vector-top-k: 10          # 向量检索召回条数
+    bm25-top-k: 10            # 词法检索召回条数
+    fusion-top-k: 5           # RRF 融合后保留条数
+    rrf-k: 60                 # RRF 常数
+    # 余弦相似度低于该阈值触发拒答。实测：相关问题 top1≈0.62，无关问题 top1≈0.40，
+    # 取 0.45 可干净分离（该值需按你的 embedding 模型 + 语料重新标定）
+    similarity-threshold: 0.45
+    # 词法通道命中强度下限。拒答判据是「向量相似度达标 或 词法命中达标」——
+    # 只看向量会把「专有名词被词法精确命中、但语义向量分不高」的情况误判成
+    # 「知识库里没有」，直接拒答。ts_rank 的量级比余弦相似度小得多，
+    # 实测精确命中的片段 ts_rank 一般在 0.05 以上。
+    lexical-threshold: 0.05
+  chunking:
+    max-chars: 600            # 单个 chunk 目标上限（按标题/段落边界软切）
+    min-chars: 120            # 段落累积达到该长度才独立成块，避免碎片
+  memory:
+    max-messages: 12          # 短期记忆窗口大小（条数）
+
+logging:
+  # 显式指定 UTF-8：默认跟随系统编码，在中文 Windows（GBK）下会把日志里的中文写成乱码，
+  # 导致链路追踪日志（含用户提问/模型回答）不可读、不利于采集分析。
+  charset:
+    console: UTF-8
+    file: UTF-8
+  level:
+    com.ragagent: info
