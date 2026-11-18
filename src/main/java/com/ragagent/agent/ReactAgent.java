@@ -7,7 +7,9 @@ import com.ragagent.dto.StreamedAnswer;
 import com.ragagent.observability.TraceLogger;
 import com.ragagent.retrieval.HybridRetriever;
 import com.ragagent.retrieval.QueryRewriter;
+import com.ragagent.retrieval.RetrievalDriftMonitor;
 import com.ragagent.retrieval.RetrievalResult;
+import com.ragagent.retrieval.ThresholdService;
 import com.ragagent.util.ModelCallGuard;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -26,6 +28,8 @@ import org.bsc.langgraph4j.agent.Agent;
 import org.bsc.langgraph4j.agentexecutor.AgentExecutor;
 import org.bsc.langgraph4j.streaming.StreamingOutput;
 import org.bsc.langgraph4j.streaming.StreamingOutputEnd;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -39,7 +43,9 @@ import java.util.stream.Stream;
 
 @Service
 public class ReactAgent {
-    private static final String REFUSAL_TEXT = "抱歉，知识库中暂未检索到相关内容，无法回答该问题。";
+    private static final Logger log = LoggerFactory.getLogger(ReactAgent.class);
+    // 话术与 RefusalArbiter 的「快路径」判定共用同一个常量，避免两处文案各自漂移
+    private static final String REFUSAL_TEXT = RefusalArbiter.REFUSAL_TEXT;
 
     private static final String SYSTEM_PROMPT = """
             你是一个严谨的企业知识库问答助手。请严格遵守以下规则：
@@ -56,8 +62,9 @@ public class ReactAgent {
     private final HybridRetriever retriever;
     private final QueryRewriter queryRewriter;
     private final TraceLogger traceLogger;
-    private final double similarityThreshold;
-    private final double lexicalThreshold;
+    private final RefusalArbiter refusalArbiter;
+    private final ThresholdService thresholds;
+    private final RetrievalDriftMonitor driftMonitor;
 
     public ReactAgent(ChatModel chatModel,
                       StreamingChatModel streamingChatModel,
@@ -66,15 +73,17 @@ public class ReactAgent {
                       QueryRewriter queryRewriter,
                       SearchKnowledgeBaseTool searchTool,
                       TraceLogger traceLogger,
-                      @Value("${app.retrieval.similarity-threshold:0.45}") double similarityThreshold,
-                      @Value("${app.retrieval.lexical-threshold:0.05}") double lexicalThreshold) {
+                      RefusalArbiter refusalArbiter,
+                      ThresholdService thresholds,
+                      RetrievalDriftMonitor driftMonitor) {
         // ---- 第 1 步：存下所有依赖（图之外的东西，构造后还要用）----
         this.chatMemoryProvider = chatMemoryProvider;
         this.retriever = retriever;
         this.queryRewriter = queryRewriter;
         this.traceLogger = traceLogger;
-        this.similarityThreshold = similarityThreshold;
-        this.lexicalThreshold = lexicalThreshold;
+        this.refusalArbiter = refusalArbiter;
+        this.thresholds = thresholds;
+        this.driftMonitor = driftMonitor;
 
         SystemMessage systemMessage = SystemMessage.from(SYSTEM_PROMPT);
         // build() 与 compile() 都抛受检异常 GraphStateException。
@@ -118,6 +127,7 @@ public class ReactAgent {
 
         // 第 1 道闸：检索层面就没把握 —— 连模型都不用调，直接按拒答返回。
         if (isLowConfidence(results)) {
+            recordDrift(results, true);
             if (withMemory) {
                 memoryFor(conversationId).add(List.of(UserMessage.from(question), AiMessage.from(REFUSAL_TEXT)));
             }
@@ -139,9 +149,12 @@ public class ReactAgent {
 
         // 模型可能自己判定「答不了」并原样吐出拒答句，此时引用列表要清空，
         // 否则前端会展示一堆与答案无关的来源。
-        boolean modelRefused = isRefusal(answer);
-        List<Source> finalSources = modelRefused ? List.of() : sources;
-        if (withMemory) {
+        //
+        // 判断方式：不靠比对文本，靠收尾一次强制 toolChoice=REQUIRED 的 function calling，
+        // 读模型自己给出的 refused 布尔字段。具体理由见 RefusalArbiter 的类注释。
+        boolean modelRefused = judgeRefusal(question, answer);
+        recordDrift(results, modelRefused);
+        List<Source> finalSources = modelRefused ? List.of() : sources;        if (withMemory) {
             memoryFor(conversationId).add(List.of(UserMessage.from(question), AiMessage.from(answer)));
         }
         // 同步路径的 token 用量先按 0 记：langgraph4j 的 CallModel 只把 AI 消息与最终文本
@@ -151,9 +164,50 @@ public class ReactAgent {
                 0, 0, System.currentTimeMillis() - start);
         return new AgentAnswer(answer, finalSources, 0, 0, modelRefused);
     }
+    /** 评测用的一次问答结果：答案 + 检索原始片段 + 是否拒答 */
+    public record EvalSample(String answer, List<String> contexts, boolean refused) {
+    }
+
+    /**
+     * 评测专用：无记忆、返回完整上下文片段。
+     *
+     * <p>为什么评测要走独立路径而不是复用 {@link #answer}：
+     * <ol>
+     *   <li><b>必须无记忆</b>：187 条用例是彼此独立的问题，如果带上历史，
+     *       前一条的问答会污染后一条的判断，分数就不可比了</li>
+     *   <li><b>必须拿到原始片段</b>：RAGAS 的 context_precision / context_recall
+     *       要的是「喂给模型的完整资料」，而 {@code Source} 只带 120 字摘要。
+     *       拿摘要去算召回率，等于用截断的输入评价检索质量，分数会莫名偏低</li>
+     * </ol>
+     */
+    public EvalSample answerForEval(String question) {
+        String conversationId = "eval";
+        List<ChatMessage> history = List.of();
+        String searchQuery = queryRewriter.rewrite(question, history);
+        List<RetrievalResult> results = retriever.search(searchQuery);
+        List<String> contexts = results.stream().map(RetrievalResult::content).toList();
+
+        if (isLowConfidence(results)) {
+            recordDrift(results, true);
+            return new EvalSample(REFUSAL_TEXT, contexts, true);
+        }
+
+        AgentExecutor.State modelState = ModelCallGuard.call("chat",
+                () -> syncGraph.invoke(buildAgentInput(history, results, question))
+                        .orElseThrow(() -> new IllegalStateException("Agent 执行未产出终态")));
+        String answer = modelState.finalResponse().orElse("");
+        if (answer.isBlank()) {
+            throw new IllegalStateException("模型未返回任何内容");
+        }
+        boolean refused = judgeRefusal(question, answer);
+        recordDrift(results, refused);
+        traceLogger.record(conversationId, refused ? "refuse-by-model" : "answer", question, answer,
+                0, 0, 0);
+        return new EvalSample(answer, contexts, refused);
+    }
+
     private Map<String, Object> buildAgentInput(List<ChatMessage> history,
-                                                List<RetrievalResult> results, String question) {
-        // 预分配 history.size() + 1：只多加"本轮"这一条（system 由框架补，不在这里）。
+                                                List<RetrievalResult> results, String question) {        // 预分配 history.size() + 1：只多加"本轮"这一条（system 由框架补，不在这里）。
         List<ChatMessage> messages = new ArrayList<>(history.size() + 1);
         messages.addAll(history);
         // 顺序是【检索结果】在前、【用户问题】在后 —— 让模型生成时"离得最近的输入是问题"，
@@ -168,14 +222,36 @@ public class ReactAgent {
         {
             return true;
         }
+        // 阈值来自 ThresholdService（标定表里的 P90 落点），不是配置里写死的绝对数：
+        // 换语料、换向量模型后重跑标定脚本，判据形态不变、数值自动跟着走。
         RetrievalResult top = results.get(0);
-        return top.similarity() < similarityThreshold && top.lexicalScore() < lexicalThreshold;
+        return top.similarity() < thresholds.similarity() && top.lexicalScore() < thresholds.lexical();
     }
-    private static boolean isRefusal(String answer) {
-        // 只有模型按 system prompt 明确吐出拒答句才算拒答。
-        // 空/空白回答不是拒答：那是上游调用异常（没产出内容），
-        // 若按拒答处理，前端会显示「已拒答」误导用户，且没有重试机会。
-        return answer != null && answer.contains(REFUSAL_TEXT);
+
+    /**
+     * 拒答判定 + 失败降级。
+     *
+     * <p>判定本身是「附加审核」：答案正文此刻已经生成好了，这一次调用只决定
+     * 引用列表要不要清空、要不要给前端打上「已拒答」标记。
+     * 所以它失败时绝不能把整次问答判死——上游抖动时（实测 tokenx24 会返回
+     * 520/522/连接重置）一次 40 秒超时 × 3 次重试之后如果抛出去，
+     * 用户等了两分钟得到的却是 502，而正确答案其实早就在手上。
+     *
+     * <p>降级方向选「按未拒答处理」：多给一条带引用的答案只是不完美，
+     * 把一条好答案丢掉（或整次请求失败）才是真正的错误。
+     */
+    private boolean judgeRefusal(String question, String answer) {
+        try {
+            return refusalArbiter.isRefused(question, answer);
+        } catch (RuntimeException e) {
+            log.warn("拒答判定调用失败，按未拒答处理（保留答案与引用）: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** 记录一次检索样本给漂移监控：top1 分数 + 这次是否拒答 */
+    private void recordDrift(List<RetrievalResult> results, boolean refused) {        double topSimilarity = results.isEmpty() ? 0.0 : results.get(0).similarity();
+        driftMonitor.record(topSimilarity, refused);
     }
     private List<Source> toSources(List<RetrievalResult> results) {
         // 转成对外的 Source 而不是直接返回内部对象，三个原因：
@@ -184,7 +260,8 @@ public class ReactAgent {
         //   3. 两个分数（similarity / lexicalScore）都要带给前端，
         //      否则只被词法命中的片段会显示成"相关度 0%"的假象。
         return results.stream()
-                .map(r -> new Source(r.sourceName(), r.similarity(), r.lexicalScore(), snippet(r.content())))
+                .map(r -> new Source(r.sourceName(), r.similarity(), r.lexicalScore(), snippet(r.content()),
+                        r.documentId(), r.chunkIndex(), r.startLine(), r.endLine()))
                 .toList();
     }
     private String buildContext(List<RetrievalResult> results) {
@@ -210,11 +287,21 @@ public class ReactAgent {
         long start = System.currentTimeMillis();
         List<ChatMessage> history = memoryFor(conversationId).messages();
         String searchQuery = queryRewriter.rewrite(question, history);
+        long rewriteDone = System.currentTimeMillis();
+        if (!searchQuery.equals(question)) {
+            log.info("问句改写 [{}] -> [{}]，耗时 {} ms", question, searchQuery, rewriteDone - start);
+        }
         List<RetrievalResult> results = retriever.search(searchQuery);
+        long searchDone = System.currentTimeMillis();
+        // 演示排障用：把「首字之前的等待」拆成改写 / 检索 / 模型首 token 三段。
+        // 没有这行日志时，前端看到 30 秒空白只能猜；有了就能说清是哪一段慢。
+        log.info("检索完成 命中 {} 条，耗时 {} ms（问句改写 {} ms）",
+                results.size(), searchDone - rewriteDone, rewriteDone - start);
         List<Source> sources = toSources(results);
         StreamOutcome outcome = new StreamOutcome();
         if(isLowConfidence(results))
         {
+            recordDrift(results, true);
             memoryFor(conversationId).add(List.of(UserMessage.from(question),AiMessage.from(REFUSAL_TEXT)));
             traceLogger.record(conversationId, "refuse-low-confidence", question, REFUSAL_TEXT, 0, 0, System.currentTimeMillis() - start);
             outcome.setRefused(true);
@@ -224,6 +311,7 @@ public class ReactAgent {
         outcome.setSources(sources);
         StringBuffer answerBuffer = new StringBuffer();
         int[] usage = {0, 0};
+        boolean[] firstTokenSeen = {false};
         Map<String, Object> input = buildAgentInput(history, results, question);
 
         // ---- 第 5 步：用 Flux.create 把「阻塞式遍历图输出」桥接成响应式 Flux ----
@@ -252,6 +340,13 @@ public class ReactAgent {
                     } else if (output instanceof StreamingOutput<?> so) {
                         String chunkText = so.chunk();
                         if (chunkText != null && !chunkText.isEmpty()) {
+                            if (!firstTokenSeen[0]) {
+                                firstTokenSeen[0] = true;
+                                log.info("流式首字到达，距请求开始 {} ms（其中检索 {} ms，模型首 token {} ms）",
+                                        System.currentTimeMillis() - start,
+                                        searchDone - start,
+                                        System.currentTimeMillis() - searchDone);
+                            }
                             // 一边累积完整回答，一边立刻往外发（交给下游做 SSE）。
                             // 过滤空片：否则会往 SSE 里发一个空事件，前端看起来像"卡了一下又没内容"。
                             answerBuffer.append(chunkText);
@@ -267,7 +362,8 @@ public class ReactAgent {
                 if (answer.isBlank()) {
                     throw new IllegalStateException("模型未返回任何内容");
                 }
-                boolean modelRefused = isRefusal(answer);
+                boolean modelRefused = judgeRefusal(question, answer);
+                recordDrift(results, modelRefused);
                 outcome.setRefused(modelRefused);
                 outcome.setSources(modelRefused ? List.of() : sources);
                 outcome.setUsage(usage[0], usage[1]);

@@ -21,6 +21,18 @@ d.txt
 dbg.txt
 dep.txt
 
+# ---- 运行时数据 ----
+# data/ 里是上传的原文件、评测导出和数据库时间戳备份，属于本机数据，不进版本库
+data/
+eval-export*.json
+
+# ---- 本机启动器 ----
+# 里面写死了 E:\Java17 这类绝对路径，换台机器就失效，不适合进版本库
+start-app.cmd
+
+# ---- 本地工作区数据 ----
+.workbuddy/
+
 # ---- 环境变量 / 密钥 ----
 .env
 .env.local

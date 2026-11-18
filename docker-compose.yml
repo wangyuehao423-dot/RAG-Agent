@@ -1,5 +1,10 @@
-# 一键启动 PostgreSQL + pgvector 向量库
+# 一键启动 PostgreSQL + pgvector 向量库 + RabbitMQ 消息队列
 # 用法：docker compose up -d
+#
+# 为什么入库要 RabbitMQ 而不是 @Async 线程池：
+#   线程池里的任务在 JVM 崩溃时直接蒸发，documents 会永久卡在「处理中」，
+#   只能靠启动时扫库对账捞一次；MQ 的手动 ack 把「确认」挪到业务成功之后，
+#   ack 前任何一步崩溃消息都会自动重投——崩溃恢复是持续的、逐条的。
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -18,5 +23,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # 消息队列：入库任务与异步摘要任务的投递通道
+  # 端口用 5673/15673 而不是默认 5672/15672：本机同时会跑 AI 面试官平台
+  # 那一套 compose，它要占标准端口，两套并存时必须错开。
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rag-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: rag
+      RABBITMQ_DEFAULT_PASS: rag123
+    ports:
+      - "5673:5672"      # AMQP 协议端口
+      - "15673:15672"    # 管理台 http://localhost:15673
+    volumes:
+      - rag_mqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
 volumes:
   rag_pgdata:
+  rag_mqdata:

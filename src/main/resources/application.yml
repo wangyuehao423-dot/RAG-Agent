@@ -18,9 +18,38 @@ spring:
     init:
       mode: always
 
+  # 消息队列：入库任务与异步摘要的投递通道。
+  # 端口 5673 是本项目 compose 里映射的宿主端口（AI 面试官那套占标准 5672）。
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5673}
+    username: ${RABBITMQ_USER:rag}
+    password: ${RABBITMQ_PASSWORD:rag123}
+    listener:
+      simple:
+        # manual：ack 由业务代码在「处理成功之后」显式调用。
+        # 用 auto（默认）时，消息一交给监听方法就算消费成功——消费者随后崩了，
+        # 消息已经没了，那份文档会永远卡在「处理中」。手动 ack 才是崩溃恢复的前提。
+        acknowledge-mode: manual
+        # prefetch 决定一个消费者手里最多攥几条未确认消息。
+        # 取 2：入库任务单条耗时长（embedding 几十秒），预取太多会让一个实例吃满队列，
+        # 多实例之间分不到活；也不能取 1，那样每条都要等一次网络往返才拿的下一条。
+        prefetch: 2
+        concurrency: 2
+        max-concurrency: 4
+    # publisher confirm：发布方确认消息真的进了 broker。
+    # 没有它，「发布成功」只是「方法没抛异常」，broker 那一刻挂了消息就静默丢失。
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+
 langchain4j:
   open-ai:
-    # 对话模型：DeepSeek V4-flash（OpenAI 兼容协议，经 tokenx24 代理访问）
+    # 对话模型：GLM-5.3-flash（OpenAI 兼容协议，经 tokenx24 代理访问）
+    # 为什么默认 GLM 而不是 deepseek：同一个网关实测 deepseek 在密集请求下会撞 60 秒读超时
+    # （一次问答被重试拖到 177 秒），演示时肉眼就是"点了不出结果"；GLM 同等条件下 6~15 秒稳定。
+    # 想切回去：启动时设 DEEPSEEK_MODEL=deepseek-v4-flash 即可，不用改这里。
     # 注意：LangChain4j 不会自动补 /v1，base-url 必须自带 /v1 结尾
     # （Spring AI 会帮你补 /v1，LangChain4j 相反——这是切框架最容易踩的坑）
     chat-model:
@@ -28,8 +57,17 @@ langchain4j:
       # 密钥不落配置文件：由启动时注入的环境变量提供（见根目录 .env / run.cmd）
       # 未注入会直接启动失败（占位符无法解析），这是刻意设计——避免拿占位符跑出 401 排查半天
       api-key: ${DEEPSEEK_API_KEY}
-      model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+      model-name: ${DEEPSEEK_MODEL:glm-5.3-flash}
       temperature: 0.3
+      # 单次调用超时：SDK 默认 60 秒。正常一次问答 8~30 秒，60 秒意味着
+      # 上游卡住时要干等一分钟才发现失败。40 秒足够覆盖正常抖动，
+      # 又能在真卡死时更快进入重试。
+      timeout: 40s
+      # 关掉 SDK 内置重试（默认 2 次）：重试策略统一由 ModelCallGuard 负责。
+      # 两层重试会相乘——SDK 2 次 × Guard 3 次 = 最多 9 次真实请求，
+      # 上游抖动时一次问答被拖到 160 秒以上（实测同步接口 160.6 秒），
+      # 演示时就是「点了之后十几分钟不出结果」。
+      max-retries: 0
     # 流式对话模型：ReActAgent 构造时按 StreamingChatModel 注入。
     # 官方 starter 只有在配了 streaming-chat-model 才会创建 StreamingChatModel Bean，
     # 只配 chat-model 会导致启动报 NoSuchBeanDefinitionException。
@@ -38,38 +76,81 @@ langchain4j:
       # 密钥不落配置文件：由启动时注入的环境变量提供（见根目录 .env / run.cmd）
       # 未注入会直接启动失败（占位符无法解析），这是刻意设计——避免拿占位符跑出 401 排查半天
       api-key: ${DEEPSEEK_API_KEY}
-      model-name: ${DEEPSEEK_MODEL:deepseek-v4-flash}
+      model-name: ${DEEPSEEK_MODEL:glm-5.3-flash}
       temperature: 0.3
       # 让服务端在流式响应的最后一个分片里带上 token 用量，
       # 否则流式路径无法统计 token（成本核算失真）
       stream-usage: true
+      # 流式超时比同步再放宽 20 秒：流式要等模型把整段答完，
+      # 而同步调用的 40 秒是「拿完整响应」的时间，两者口径不同。
+      timeout: 60s
+      # 同上：关掉 SDK 内置重试，避免与 ModelCallGuard 相乘。
+      # 流式请求本来就没有被 Guard 包住，这里关掉更是必须的。
+      max-retries: 0
     # 向量化模型：通义千问百炼（text-embedding-v3，1024 维，与建表一致）
     embedding-model:
       base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
       # 密钥不落配置文件：由启动时注入的环境变量提供（见根目录 .env / run.cmd）
       api-key: ${DASHSCOPE_API_KEY}
       model-name: ${DASHSCOPE_EMBEDDING_MODEL:text-embedding-v3}
+      # 单次请求最多送 10 条文本。这个值不是调优项，是硬约束：
+      # 百炼 text-embedding-v3 的 batch 上限就是 10，超了直接 400
+      # （InternalError.Algo.InvalidParameter: batch size should not be larger than 10）。
+      # LangChain4j 默认不拆分，整段所有 chunk 一次发出——一篇 30 块的文档必然失败。
+      max-segments-per-batch: 10
 
 server:
   port: 8080
 
 app:
   retrieval:
-    vector-top-k: 10          # 向量检索召回条数
-    bm25-top-k: 10            # 词法检索召回条数
-    fusion-top-k: 5           # RRF 融合后保留条数
+    # 四段流水线的三个截断点：30/30 召回 -> 60 融合 -> 20 进精排 -> 5 送模型。
+    vector-top-k: 30          # 向量通道召回条数
+    bm25-top-k: 30            # 词法通道召回条数
+                              # 为什么各要 30：单路有系统性盲区（向量漏编号、词法漏同义改写），
+                              # 池子太小的话另一路能救回来的那条根本没进来。
+    candidate-top-k: 20       # 融合后送进精排的候选数
+                              # 为什么截到 20：精排逐条过 transformer，延迟随条数线性涨；
+                              # RRF 排到 20 名以后的进 top5 概率已经很低，不值得付算力。
+    fusion-top-k: 5           # 精排后最终留给大模型的条数
     rrf-k: 60                 # RRF 常数
-    # 余弦相似度低于该阈值触发拒答。实测：相关问题 top1≈0.62，无关问题 top1≈0.40，
-    # 取 0.45 可干净分离（该值需按你的 embedding 模型 + 语料重新标定）
+    # 拒答阈值：这里写的只是「兜底值」，不是实际生效值。
+    # 实际值来自 retrieval_thresholds 表——由 ThresholdCalibrator 用已知无关查询
+    # 跑全库得到背景分布、取 P90 分位自动标定后落库（见 POST /api/retrieval/calibrate）。
+    # 为什么不用固定数：0.45 这种绝对值跟 embedding 模型、语料结构、文档长度全绑定，
+    # 换库/换模型含义就变了；而 P90 是「相对当前语料噪声位」的分位数，天然跟着语料漂移。
+    # 想换口径就重跑标定，而不是来改这里。
     similarity-threshold: 0.45
     # 词法通道命中强度下限。拒答判据是「向量相似度达标 或 词法命中达标」——
     # 只看向量会把「专有名词被词法精确命中、但语义向量分不高」的情况误判成
     # 「知识库里没有」，直接拒答。ts_rank 的量级比余弦相似度小得多，
-    # 实测精确命中的片段 ts_rank 一般在 0.05 以上。
+    # 实测精确命中的片段 ts_rank 一般在 0.05 以上。同样只是兜底值。
     lexical-threshold: 0.05
+  rerank:
+    # 精排：把（问题，候选块）成对喂交叉编码器重新打分。
+    # 用它是为了修双塔的天花板——向量只能判断「两段话像不像」，
+    # 判断不了「这段能不能回答这个问题」（问年假命中病假规定，余弦 0.58 但答不了）。
+    enabled: ${RERANK_ENABLED:true}
+    url: ${DASHSCOPE_RERANK_URL:https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank}
+    # 复用 embedding 同一个 key（同一个 DashScope 账号），不单独配。
+    # 没配 key 时自动禁用并降级为 RRF 顺序，不会让启动失败。
+    api-key: ${DASHSCOPE_API_KEY:}
+    model: ${DASHSCOPE_RERANK_MODEL:gte-rerank-v2}
+    # 3 秒：实测 20 条在几百毫秒内跑完，3 秒是很宽的余量；
+    # 再长就把用户可感知的等待拖到不可接受了。
+    timeout-ms: 3000
   chunking:
     max-chars: 600            # 单个 chunk 目标上限（按标题/段落边界软切）
     min-chars: 120            # 段落累积达到该长度才独立成块，避免碎片
+  ingestion:
+    # 一个段最多装多少块。超过就拆成多段，一段一条消息。
+    # 上限来自两件事：单事务写入时长（GIN 索引维护）和单次重做的可接受时长。
+    # 取 100 是权衡：535 块的文档会拆成 6 段，一段失败只重跑 100 块的向量化；
+    # 再小会让消息数量爆炸，事务和调度开销压过收益。
+    segment-max-chunks: 100
+  storage:
+    # 原始文件落盘目录。异步入库的消费者要能重新读到文件，所以必须落盘、不能只留在内存。
+    upload-dir: data/uploads
   memory:
     max-messages: 12          # 短期记忆窗口大小（条数）
 

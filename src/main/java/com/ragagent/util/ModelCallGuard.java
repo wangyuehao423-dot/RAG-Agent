@@ -54,6 +54,8 @@ public final class ModelCallGuard {
     private static final Logger log = LoggerFactory.getLogger(ModelCallGuard.class);
     private static final int MAX_ATTEMPTS = 3;
     private static final long BASE_BACKOFF_MS = 200;
+    /** 超过这个耗时就打 INFO，方便定位"一次问答为什么慢"。 */
+    private static final long SLOW_CALL_MS = 3000;
 
     /** 上游 HTTP 状态码通常位于 LangChain4j 异常消息的开头，形如 "401 - {...}" */
     private static final Pattern STATUS_PREFIX = Pattern.compile("^\\s*(\\d{3})(?!\\d)");
@@ -92,8 +94,18 @@ public final class ModelCallGuard {
     public static <T> T call(String what, Supplier<T> action) {
         RuntimeException last = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            long startedAt = System.currentTimeMillis();
             try {
-                return action.get();
+                T value = action.get();
+                // 慢调用要能被看见：演示时"点了半天没反应"往往就是某一次模型调用慢，
+                // 没有这条日志只能靠猜。3 秒以内走 DEBUG（不刷屏），超过就 INFO 打出来。
+                long cost = System.currentTimeMillis() - startedAt;
+                if (cost >= SLOW_CALL_MS) {
+                    log.info("{} 调用完成，耗时 {} ms（慢调用）", what, cost);
+                } else {
+                    log.debug("{} 调用完成，耗时 {} ms", what, cost);
+                }
+                return value;
             } catch (RuntimeException e) {
                 // 先分类：不可重试（401/403/400/404）立刻失败，
                 // 省掉没有意义的等待与重试，也不把它伪装成「稍后重试」。

@@ -42,6 +42,24 @@ public class DocumentParserService {
     }
 
     /**
+     * 扩展名是否在支持范围内——供上传入口做「快速失败」用。
+     *
+     * <p>为什么上传入口要单独问一次：入库改成异步之后，解析发生在消费者里，
+     * 一个 .exe 会先被受理（202）、写一行 documents、投一条消息，过几秒才变成 FAILED。
+     * 用户看到的是「上传成功」，实际是白排一次队。类型是提交阶段就能判断的信息，
+     * 没必要拖到消费端才失败——所以入口用这个方法挡一道 400。</p>
+     *
+     * <p>和 {@link #parse} 的白名单故意保持同一份定义：这里判断「能不能接」，
+     * parse 里的 default 分支是消费端的兜底（消息可能是老版本投的、或文件后面被改坏）。</p>
+     */
+    public static boolean supports(String filename) {
+        return switch (extension(filename)) {
+            case "txt", "md", "markdown", "pdf", "docx" -> true;
+            default -> false;
+        };
+    }
+
+    /**
      * 解码纯文本：优先 UTF-8 严格解码，失败则回退 GB18030。
      *
      * <p>不能直接 new String(content, UTF_8)。中文 Windows 上大量 txt 是

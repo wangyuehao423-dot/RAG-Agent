@@ -37,6 +37,16 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
 
+        <!-- 消息队列：入库任务与异步摘要任务的投递通道。
+             为什么必须要它（而不是 @Async 线程池）：
+             线程池里的任务在 JVM 崩溃时直接蒸发，documents 永久卡在「处理中」，
+             只能靠启动时扫库对账捞一次；MQ 的手动 ack 把「确认」挪到业务成功之后，
+             ack 前任何一步崩溃消息都会自动重投——崩溃恢复是持续的、逐条的。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
         <!-- reactor-core：此前的 spring-ai-starter 传递引入了它；Spring AI 移除后需显式声明。
              StreamedAnswer 等流式类型基于 Mono/Flux 组装，缺少会编译不过。 -->
         <dependency>

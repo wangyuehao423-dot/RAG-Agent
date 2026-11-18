@@ -21,12 +21,13 @@ public class ChunkRepository {
         this.embeddingModel = embeddingModel;
     }
 
-    public void saveWithVector(String documentId, int chunkIndex, String content, String sourceName, float[] vector) {
+    public void saveWithVector(String documentId, int chunkIndex, String content, String sourceName,
+                               float[] vector, int startLine, int endLine) {
         String tokens = ChineseTokenizer.toText(content);
         jdbc.update(
-                "INSERT INTO chunks(document_id, chunk_index, content, content_tsv, embedding, source_name) "
-                        + "VALUES (?::uuid, ?, ?, to_tsvector('simple', ?), ?::vector, ?)",
-                documentId, chunkIndex, content, tokens, vectorToString(vector), sourceName);
+                "INSERT INTO chunks(document_id, chunk_index, content, content_tsv, embedding, source_name, start_line, end_line) "
+                        + "VALUES (?::uuid, ?, ?, to_tsvector('simple', ?), ?::vector, ?, ?, ?)",
+                documentId, chunkIndex, content, tokens, vectorToString(vector), sourceName, startLine, endLine);
     }
 
     public List<float[]> embedBatch(List<String> texts) {
@@ -43,13 +44,19 @@ public class ChunkRepository {
         float[] qv = embed(query);
         String q = vectorToString(qv);
         return jdbc.query(
-                "SELECT id, content, source_name, 1 - (embedding <=> ?::vector) AS similarity "
+                "SELECT id, content, source_name, document_id::text AS document_id, chunk_index, "
+                        + "COALESCE(start_line, 0) AS start_line, COALESCE(end_line, 0) AS end_line, "
+                        + "1 - (embedding <=> ?::vector) AS similarity "
                         + "FROM chunks ORDER BY embedding <=> ?::vector LIMIT ?",
                 (rs, i) -> new ScoredChunk(
                         rs.getString("id"),
                         rs.getString("content"),
                         rs.getString("source_name"),
-                        rs.getDouble("similarity")),
+                        rs.getDouble("similarity"),
+                        rs.getString("document_id"),
+                        rs.getInt("chunk_index"),
+                        rs.getInt("start_line"),
+                        rs.getInt("end_line")),
                 q, q, topK);
     }
 
@@ -65,13 +72,19 @@ public class ChunkRepository {
             return List.of();
         }
         return jdbc.query(
-                "SELECT id, content, source_name, ts_rank(content_tsv, to_tsquery('simple', ?)) AS score "
+                "SELECT id, content, source_name, document_id::text AS document_id, chunk_index, "
+                        + "COALESCE(start_line, 0) AS start_line, COALESCE(end_line, 0) AS end_line, "
+                        + "ts_rank(content_tsv, to_tsquery('simple', ?)) AS score "
                         + "FROM chunks WHERE content_tsv @@ to_tsquery('simple', ?) ORDER BY score DESC LIMIT ?",
                 (rs, i) -> new ScoredChunk(
                         rs.getString("id"),
                         rs.getString("content"),
                         rs.getString("source_name"),
-                        rs.getDouble("score")),
+                        rs.getDouble("score"),
+                        rs.getString("document_id"),
+                        rs.getInt("chunk_index"),
+                        rs.getInt("start_line"),
+                        rs.getInt("end_line")),
                 tsQuery, tsQuery, topK);
     }
 

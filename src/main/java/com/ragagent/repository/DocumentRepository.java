@@ -23,8 +23,11 @@ public class DocumentRepository {
 
     public List<Map<String, Object>> findAll()
     {
+        // has_raw 让前端知道这份文档能不能「点来源跳原文」——老数据入库时没存原文，
+        // 列出来但点不动，不如提前告诉用户原因。
         return jdbc.queryForList(
-                "SELECT id, name, file_type, chunk_count, status, error_msg, created_at "
+                "SELECT id, name, file_type, chunk_count, status, error_msg, created_at, "
+                        + "(raw_text IS NOT NULL) AS has_raw "
                         + "FROM documents ORDER BY created_at DESC");
     }
 
@@ -35,13 +38,32 @@ public class DocumentRepository {
 
     public Map<String, Object> findById(UUID id) {
         return jdbc.queryForMap(
-                "SELECT id, name, file_type, chunk_count, status, error_msg, created_at "
+                "SELECT id, name, file_type, chunk_count, status, error_msg, created_at, "
+                        + "(raw_text IS NOT NULL) AS has_raw "
                         + "FROM documents WHERE id = ?", id);
+    }
+
+    /**
+     * 保存解析后的全文。引用来源要「跳回原文那一行」，必须有原文可跳。
+     *
+     * <p>放在拆段阶段写：那时原文件还没删；等到 ingestSegment 再写就晚了——
+     * 段消息可能被另一个实例消费，它手上只有分块文本，没有整篇原文。
+     */
+    public void saveRawText(String documentId, String text) {
+        jdbc.update("UPDATE documents SET raw_text = ? WHERE id = ?::uuid", text, documentId);
+    }
+
+    /** 取原文用于前端展示；没存原文返回 null（老数据） */
+    public String findRawText(UUID id) {
+        List<String> rows = jdbc.queryForList(
+                "SELECT raw_text FROM documents WHERE id = ?", String.class, id);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     public List<Map<String, Object>> findChunks(UUID documentId) {
         return jdbc.queryForList(
-                "SELECT chunk_index, content FROM chunks WHERE document_id = ? ORDER BY chunk_index", documentId);
+                "SELECT chunk_index, content, start_line, end_line FROM chunks "
+                        + "WHERE document_id = ? ORDER BY chunk_index", documentId);
     }
 
     public int countChunks(UUID documentId) {
@@ -54,6 +76,35 @@ public class DocumentRepository {
         List<String> ids = jdbc.queryForList(
                 "SELECT id::text FROM documents WHERE content_hash = ?", String.class, contentHash);
         return ids.isEmpty() ? null : ids.get(0);
+    }
+
+    /** 按内容哈希查已有文档（含状态）：秒传要用状态判断「能不能秒传」 */
+    public ExistingDoc findByContentHash(String contentHash) {
+        List<ExistingDoc> docs = jdbc.query(
+                "SELECT id::text, status FROM documents WHERE content_hash = ? ORDER BY created_at LIMIT 1",
+                (rs, i) -> new ExistingDoc(rs.getString(1), rs.getString(2)),
+                contentHash);
+        return docs.isEmpty() ? null : docs.get(0);
+    }
+
+    public record ExistingDoc(String id, String status) {
+    }
+
+    /** 入库失败：写状态 + 原因，让用户看到「为什么没进去」，而不是一句未知错误 */
+    public void markFailed(String documentId, String error) {
+        jdbc.update("UPDATE documents SET status = 'FAILED', error_msg = ? WHERE id = ?::uuid",
+                error, documentId);
+    }
+
+    /** 命中 FAILED 记录后重跑：重置状态与错误信息，段表在登记阶段会复用已有记录 */
+    public void resetToProcessing(String documentId) {
+        jdbc.update("UPDATE documents SET status = 'PROCESSING', error_msg = NULL WHERE id = ?::uuid",
+                documentId);
+    }
+
+    /** 提交阶段失败（还没登记段）时把总数置为 0，避免前端一直显示 0/1 */
+    public void resetProgress(String documentId) {
+        jdbc.update("UPDATE documents SET segment_total = 0, segment_done = 0 WHERE id = ?::uuid", documentId);
     }
     /**
      * 删除一条文档。

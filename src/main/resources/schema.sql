@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS documents (
     chunk_count  INT DEFAULT 0,
     status       VARCHAR(20) DEFAULT 'PROCESSING',  -- PROCESSING / DONE / FAILED
     error_msg    TEXT,                              -- 入库失败原因（status = FAILED 时有值）
+    -- 解析后的纯文本全文。存它的唯一目的是「引用可回溯」：前端点开一条引用来源时，
+    -- 要能把原文按行展示并定位到被引用的那几行。不存原文就只能拼 chunks，
+    -- 而 chunks 带着标题前缀、丢了空行，拼出来的「原文」行号和真实文件对不上。
+    raw_text     TEXT,
     created_at   TIMESTAMP DEFAULT now()
 );
 
@@ -28,6 +32,35 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64);
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS error_msg TEXT;
 ALTER TABLE documents ALTER COLUMN status SET DEFAULT 'PROCESSING';
 CREATE UNIQUE INDEX IF NOT EXISTS documents_content_hash_idx ON documents (content_hash);
+
+-- 分段入库的进度列：
+--   segment_total = 这篇文档拆了几段（解析完才知道，所以默认 0）
+--   segment_done  = 已完成几段（段完成时原子自增）
+-- 收敛判断就是 segment_done >= segment_total，靠自增的原子性保证「只有一次成立」，
+-- 而不是靠「最后一条消息是谁」——后者在并发消费下根本不可靠。
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS segment_total INT DEFAULT 0;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS segment_done INT DEFAULT 0;
+
+-- 段表：大文件分段入库的重做单元
+--   唯一键 (document_id, seq)：同一段被重复投递时不会重复登记，消费前查状态即可跳过
+--   chunk_start / chunk_end：本段在全文中的下标区间，保证 chunk_index 全局连续
+-- 粒度降到「段」的理由：一份 100MB 文档拆成几十段，一段失败只重投这一段，
+-- 已经成功的段不重跑；文档级重做单元太粗，一个错字就要跑完整篇。
+CREATE TABLE IF NOT EXISTS document_segments (
+    id          BIGSERIAL PRIMARY KEY,
+    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    seq         INT  NOT NULL,
+    chunk_start INT  NOT NULL DEFAULT 0,
+    chunk_end   INT  NOT NULL DEFAULT 0,
+    chunk_count INT  NOT NULL DEFAULT 0,
+    status      VARCHAR(20) NOT NULL DEFAULT 'PENDING',   -- PENDING / DONE / FAILED
+    error_msg   TEXT,
+    created_at  TIMESTAMP DEFAULT now(),
+    updated_at  TIMESTAMP DEFAULT now(),
+    CONSTRAINT document_segments_doc_seq_uk UNIQUE (document_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS document_segments_doc_idx ON document_segments (document_id);
 
 -- 知识库分块表：同时承担「向量检索」与「词法检索(BM25 语义)」两条通道
 CREATE TABLE IF NOT EXISTS chunks (
@@ -41,6 +74,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     content_tsv  TSVECTOR,                     -- 中文 bigram 分词后的全文检索列
     embedding    VECTOR(1024),                 -- 与 embedding 模型维度对齐（text-embedding-v3 默认 1024）
     source_name  VARCHAR(255),                 -- 来源文档名
+    -- 这一块内容在 raw_text 里的起止行号（1 基，闭区间）。分块时顺手记下，
+    -- 前端据此把原文滚到对应位置并高亮。老数据这两列为空，前端会提示「未保留原文」。
+    start_line   INT,
+    end_line     INT,
     created_at   TIMESTAMP DEFAULT now()
 );
 
@@ -91,6 +128,38 @@ CREATE TABLE IF NOT EXISTS eval_cases (
     id        BIGSERIAL PRIMARY KEY,
     question  TEXT NOT NULL,
     expected  TEXT
+);
+
+-- 拒答阈值标定结果：阈值不是常量，是「背景分布的分位数在当前语料上的落点」
+--   value            这次标定算出来的数值
+--   sample_size      参与标定的背景查询条数（样本太少时 P90 不稳）
+--   percentile       分位点，固定 90
+--   corpus_fingerprint 语料指纹（文档数 + 分块数）：语料变了指纹就变，
+--                    用来发现「换了知识库但没重标阈值」这种情况
+-- 为什么把阈值落库而不是写配置文件：写死一个绝对数，换一版知识库就得人工改一次；
+-- 落库 + 标定脚本重跑，阈值跟着语料自动走，代码一个字都不用动。
+CREATE TABLE IF NOT EXISTS retrieval_thresholds (
+    metric             VARCHAR(32) PRIMARY KEY,   -- similarity / lexical
+    value              DOUBLE PRECISION NOT NULL,
+    sample_size        INT,
+    percentile         INT DEFAULT 90,
+    corpus_fingerprint VARCHAR(64),
+    calibrated_at      TIMESTAMP DEFAULT now()
+);
+
+-- 评测运行记录：每次 RAGAS 评测落一行，形成可比对的基线
+-- 为什么要有这张表：「改完变好了没有」不能靠感觉，只能跟上一行比。
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id              BIGSERIAL PRIMARY KEY,
+    mode            VARCHAR(20) NOT NULL,          -- export / ragas
+    baseline_id     BIGINT,                        -- 本次对比的基线行
+    case_count      INT,
+    faithfulness         DOUBLE PRECISION,
+    answer_relevancy     DOUBLE PRECISION,
+    context_precision    DOUBLE PRECISION,
+    context_recall       DOUBLE PRECISION,
+    note            TEXT,
+    created_at      TIMESTAMP DEFAULT now()
 );
 
 -- 仅当评测表为空时写入初始用例（幂等；不使用 DO 块以避免被脚本初始化器按分号切坏）

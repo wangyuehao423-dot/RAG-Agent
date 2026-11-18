@@ -6,6 +6,18 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 按「标题路径 + 段落累积」切块，同时记录每块正文在原文中的起止行号。
+ *
+ * <h3>行号是怎么来的（也是这里最容易错的地方）</h3>
+ * 遍历行时维护两个游标：{@code bodyStart} 在缓冲区从空变为非空的那一刻记下当前行号，
+ * {@code bodyEnd} 每 append 一行就更新。落块时用它们作为范围。
+ * 空行不参与正文（{@code cur.length() == 0} 时空行被完全丢弃），所以连续空行不会把范围撑大。
+ *
+ * <h3>为什么范围不含标题前缀</h3>
+ * 每块正文前面会拼一段「H1 &gt; H2」的路径，那是给人看上下文用的，
+ * 原文里并不存在对应行。范围只覆盖正文，前端高亮才不会偏。
+ */
 @Service
 public class ChunkingService {
     private final int maxChars;
@@ -17,55 +29,66 @@ public class ChunkingService {
         this.minChars = minChars;
     }
 
-    public List<String> chunk(String text) {
+    public List<ChunkPiece> chunk(String text) {
         if (text == null || text.isBlank()) {
             return List.of();
         }
-        List<String> lines = List.of(text.split("\\R", -1));
-        List<String> chunks = new ArrayList<>();
+        String[] lines = text.split("\\R", -1);
+        List<ChunkPiece> out = new ArrayList<>();
         String[] headingPath = new String[6];
         StringBuilder cur = new StringBuilder();
-        StringBuilder curHeading = new StringBuilder();
-        for (String raw : lines) {
-            String line = raw.strip();
+        String curHeading = "";
+        int bodyStart = 0;
+        int bodyEnd = 0;
+
+        for (int i = 0; i < lines.length; i++) {
+            int lineNo = i + 1;
+            String line = lines[i].strip();
             int level = headingLevel(line);
 
             if (level > 0) {
-                flush(chunks, cur, curHeading);
+                if (cur.length() > 0) {
+                    out.add(new ChunkPiece(withHeading(curHeading, cur.toString()), bodyStart, bodyEnd));
+                    cur.setLength(0);
+                }
                 updatePath(headingPath, level, line);
-                curHeading.setLength(0);
-                curHeading.append(buildPath(headingPath));
+                curHeading = buildPath(headingPath);
                 continue;
             }
             if (line.isEmpty() && cur.length() >= minChars) {
-                flush(chunks, cur, curHeading);
+                out.add(new ChunkPiece(withHeading(curHeading, cur.toString()), bodyStart, bodyEnd));
+                cur.setLength(0);
             }
             if (line.length() > maxChars) {
-                flush(chunks, cur, curHeading);
+                if (cur.length() > 0) {
+                    out.add(new ChunkPiece(withHeading(curHeading, cur.toString()), bodyStart, bodyEnd));
+                    cur.setLength(0);
+                }
                 for (String seg : splitLong(line)) {
-                    chunks.add(withHeading(curHeading.toString(), seg));
+                    // 超长单行被拆成多块：它们都来自同一行，范围就是这一行
+                    out.add(new ChunkPiece(withHeading(curHeading, seg), lineNo, lineNo));
                 }
                 continue;
             }
             if (cur.length() > 0 && cur.length() + line.length() + 1 > maxChars) {
-                flush(chunks, cur, curHeading);
+                out.add(new ChunkPiece(withHeading(curHeading, cur.toString()), bodyStart, bodyEnd));
+                cur.setLength(0);
             }
-            if (cur.length() > 0) {
+            if (cur.length() == 0) {
+                bodyStart = lineNo;      // 正文第一行：范围从这里开始
+            } else {
                 cur.append('\n');
             }
             cur.append(line);
+            bodyEnd = lineNo;            // 每纳入一行就推进范围末尾
         }
-        flush(chunks, cur, curHeading);
-        return chunks.stream().map(String::strip).filter(s -> !s.isEmpty()).toList();
-    }
-
-    /** 将当前缓冲区落盘为一个 chunk（带标题前缀） */
-    private void flush(List<String> chunks, StringBuilder cur, StringBuilder heading) {
-        if (cur.length() == 0) {
-            return;
+        if (cur.length() > 0) {
+            out.add(new ChunkPiece(withHeading(curHeading, cur.toString()), bodyStart, bodyEnd));
         }
-        chunks.add(withHeading(heading.toString(), cur.toString()));
-        cur.setLength(0);
+        return out.stream()
+                .map(p -> new ChunkPiece(p.text().strip(), p.startLine(), p.endLine()))
+                .filter(p -> !p.text().isEmpty())
+                .toList();
     }
 
     private String withHeading(String heading, String body) {
